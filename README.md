@@ -29,7 +29,10 @@ Create a file called `agent.pkr.hcl`:
 ```hcl
 packer {
   required_plugins {
-    amazon = { version = ">= 1.2.0"; source = "github.com/hashicorp/amazon" }
+    amazon = {
+      version = ">= 1.2.0"
+      source  = "github.com/hashicorp/amazon"
+    }
   }
 }
 
@@ -307,13 +310,15 @@ terraform output
 
 ## Cost
 
-| Resource | $/mo |
-|---|---|
-| t3.small server | ~$15 |
-| Elastic IP (attached) | $0 |
-| Lambda + EventBridge (1/min) | ~$0 |
-| **Idle total** | **~$15/mo** |
-| g4dn.xlarge spot (when cracking) | ~$0.16–0.20/hr per instance |
+| Resource | $/mo | Notes |
+|---|---|---|
+| t3.small server | ~$15 | On-demand, runs 24/7 |
+| Server EBS volume (8GB gp3) | ~$1 | Root disk |
+| Agent AMI snapshot | ~$1.50 | CUDA image stored in S3 after Packer build |
+| Elastic IP (attached) | $0 | Only charged when not attached to a running instance |
+| Lambda + EventBridge (1/min) | $0 | Well within free tier (43,800 invocations/mo vs 1M free) |
+| **Idle total** | **~$18/mo** | |
+| g4dn.xlarge spot (when cracking) | $0.16–0.25/hr per instance | Fluctuates — check current prices at EC2 Spot Pricing page |
 
 Spot instances are terminated the moment you archive all tasks.
 
