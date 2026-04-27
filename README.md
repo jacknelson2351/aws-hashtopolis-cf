@@ -1,6 +1,6 @@
 # Hashtopolis on AWS
 
-Distributed password cracking on AWS using Hashtopolis. A Hashtopolis server runs on EC2 and a Lambda function automatically scales spot agent instances up and down based on active tasks.
+Distributed password cracking on AWS using Hashtopolis. A Hashtopolis server runs on EC2 and a Lambda function automatically scales GPU spot agent instances up and down based on active tasks.
 
 Port 8080 is **not exposed to the internet**. All access is through AWS SSM — no SSH keys, no open ports, no VPN.
 
@@ -11,12 +11,10 @@ Port 8080 is **not exposed to the internet**. All access is through AWS SSM — 
 | Part | What it does |
 |---|---|
 | Hashtopolis server | Runs the web UI and API on a `t3.small` EC2 instance using Docker Compose |
-| Agent AMI | Pre-installs hashcat and agent dependencies so spot agents boot fast |
+| Agent AMI | Pre-installs NVIDIA CUDA drivers so GPU spot agents boot fast |
 | Auto Scaling Group | Holds the agent fleet at `0` when idle, scales up when tasks exist |
-| Lambda scaler | Polls Hashtopolis every minute and sets ASG desired capacity accordingly |
+| Lambda scaler | Polls Hashtopolis every minute and sets ASG desired capacity (2 agents per task) |
 | IAM viewer group | Grants named users SSM port-forward access to the UI — no shell, no other permissions |
-
-> **Current state:** CPU-only (`c5.xlarge`) while GPU quota is pending. See [Switching to GPU](#switching-to-gpu) when approved.
 
 ---
 
@@ -31,11 +29,13 @@ Install these before starting:
 
 No SSH key pair is needed.
 
+> **Note:** `g4dn.xlarge` spot instances require G-instance vCPU quota in your AWS account. Request this via **Service Quotas → EC2 → Running On-Demand G and VT instances** before deploying.
+
 ---
 
 ## Step 1 — Build the Agent AMI
 
-Run once. Packer launches a temporary build instance, installs all dependencies, and snapshots it into an AMI.
+Run once. Packer launches a temporary `c5.xlarge` build instance, installs NVIDIA CUDA drivers and agent dependencies, and snapshots it into an AMI. The build instance does not need a GPU — drivers are installed at build time and activate when the AMI boots on a GPU instance.
 
 ```bash
 packer init agent.pkr.hcl
@@ -136,9 +136,9 @@ The stack is now fully operational. Add a task in Hashtopolis and agents will ap
 
 ## How Auto-Scaling Works
 
-The Lambda runs every minute, counts non-archived tasks via the Hashtopolis API, and sets ASG desired capacity accordingly (capped at `max_gpu_instances`).
+The Lambda runs every minute, counts non-archived tasks via the Hashtopolis API, and sets ASG desired capacity to **2 agents per active task** (capped at `max_gpu_instances`).
 
-- **Add a task** → Lambda detects it → spot agents launch → register → cracking starts
+- **Add a task** → Lambda detects it → 2 spot GPU agents launch → register → cracking starts
 - **Archive the task** → Lambda detects zero tasks → ASG scales to 0 → instances terminate
 
 ---
@@ -168,7 +168,7 @@ The Lambda runs every minute, counts non-archived tasks via the Hashtopolis API,
 | Elastic IP (attached) | $0 |
 | Lambda + EventBridge | $0 (free tier) |
 | **Idle total** | **~$16–17/mo** |
-| c5.xlarge spot agents | hourly while cracking |
+| g4dn.xlarge spot agents | ~$0.16–0.30/hr per instance while cracking |
 
 ---
 
@@ -192,8 +192,8 @@ The default hashcat cracker URL may need registering. Go to **Config → Cracker
 **SSM command not found**
 Install the Session Manager plugin linked in Prerequisites.
 
-**`VcpuLimitExceeded` during Packer build**
-Your account has no vCPU quota for that instance family. The current config uses `c5.xlarge` to avoid this. Request GPU quota before switching to `g4dn.xlarge`.
+**`VcpuLimitExceeded` during agent launch**
+Request G-instance spot quota via **Service Quotas → EC2 → G and VT Spot Instance Requests**.
 
 ---
 
@@ -216,71 +216,3 @@ aws ec2 describe-images --owners self \
 aws ec2 deregister-image --image-id ami-xxxxxxxxxxxxxxxxx
 aws ec2 delete-snapshot --snapshot-id snap-xxxxxxxxxxxxxxxxx
 ```
-
----
-
-## Switching to GPU
-
-After AWS approves G-instance quotas, make the following exact changes:
-
-### 1. `agent.pkr.hcl` — change build instance type
-
-```diff
--  instance_type = "c5.xlarge"
-+  instance_type = "g4dn.xlarge"
-```
-
-### 2. `scripts/agent_init.sh` — replace PoCL with NVIDIA drivers + CUDA
-
-```bash
-#!/bin/bash
-set -e
-export DEBIAN_FRONTEND=noninteractive
-
-apt-get update -y
-apt-get install -y software-properties-common
-add-apt-repository universe -y
-apt-get update -y
-apt-get install -y ca-certificates curl p7zip-full python3 python3-pip
-
-# NVIDIA driver + CUDA keyring
-curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb
-dpkg -i /tmp/cuda-keyring.deb
-apt-get update -y
-apt-get install -y cuda-drivers nvidia-cuda-toolkit
-
-pip3 install requests psutil
-```
-
-### 3. `agents.tf` — change instance type and remove `--cpu-only`
-
-```diff
--  instance_type = "c5.xlarge"
-+  instance_type = "g4dn.xlarge"
-```
-
-```diff
-     exec /usr/bin/python3 /opt/hashtopolis/hashtopolis.zip \
-       --url "http://${aws_instance.server.private_ip}:8080/api/server.php" \
--      --voucher "${var.hashtopolis_voucher}" \
--      --cpu-only
-+      --voucher "${var.hashtopolis_voucher}"
-```
-
-### 4. Rebuild the AMI
-
-```bash
-packer build agent.pkr.hcl
-```
-
-Copy the new AMI ID from the output.
-
-### 5. Re-apply Terraform
-
-```bash
-terraform apply \
-  -var="agent_ami_id=ami-NEW_AMI_ID_HERE" \
-  -var="hashtopolis_voucher=YOUR_VOUCHER_HERE"
-```
-
-> After switching, go to **Config → Crackers** in the Hashtopolis UI and register a GPU-compatible hashcat version (7.x) so agents pick it up.

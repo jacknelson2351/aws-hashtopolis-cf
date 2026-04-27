@@ -1,7 +1,7 @@
 resource "aws_launch_template" "agent" {
   name_prefix            = "hashtopolis-agent-"
   image_id               = var.agent_ami_id
-  instance_type = "c5.xlarge"
+  instance_type = "g4dn.xlarge"
 
   iam_instance_profile {
     name = aws_iam_instance_profile.agent.name
@@ -37,8 +37,7 @@ resource "aws_launch_template" "agent" {
 
     exec /usr/bin/python3 /opt/hashtopolis/hashtopolis.zip \
       --url "http://${aws_instance.server.private_ip}:8080/api/server.php" \
-      --voucher "${var.hashtopolis_voucher}" \
-      --cpu-only
+      --voucher "${var.hashtopolis_voucher}"
     SCRIPT
 
     chmod +x /opt/hashtopolis/start-agent.sh
