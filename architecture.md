@@ -15,8 +15,8 @@ graph TB
             Backend <--> DB
         end
 
-        subgraph ASG["Auto Scaling Group — c5.xlarge spot — scales 0 to N based on tasks"]
-            Agent["Agent EC2<br/>hashcat + python pre-baked in AMI<br/>no inbound rules"]
+        subgraph ASG["Auto Scaling Group — g4dn.xlarge spot — scales 0 to N based on tasks"]
+            Agent["Agent EC2<br/>NVIDIA CUDA drivers + python pre-baked in AMI<br/>no inbound rules"]
         end
 
         Lambda["λ Lambda Scaler — VPC attached"]
