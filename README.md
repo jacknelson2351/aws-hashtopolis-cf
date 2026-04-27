@@ -29,13 +29,13 @@ Install these before starting:
 
 No SSH key pair is needed.
 
-> **Note:** `g4dn.xlarge` spot instances require G-instance vCPU quota in your AWS account. Request this via **Service Quotas → EC2 → Running On-Demand G and VT instances** before deploying.
+> **Note:** `g4dn.xlarge` instances require G-instance quota in your AWS account. Request both **Running On-Demand G and VT instances** and **G and VT Spot Instance Requests** via **Service Quotas → EC2** before deploying.
 
 ---
 
 ## Step 1 — Build the Agent AMI
 
-Run once. Packer launches a temporary `c5.xlarge` build instance, installs NVIDIA CUDA drivers and agent dependencies, and snapshots it into an AMI. The build instance does not need a GPU — drivers are installed at build time and activate when the AMI boots on a GPU instance.
+Run once. Packer launches a `g4dn.xlarge` build instance, installs NVIDIA CUDA drivers and agent dependencies, and snapshots it into an AMI.
 
 ```bash
 packer init agent.pkr.hcl
@@ -118,6 +118,13 @@ Without this, the first agent registration consumes the voucher and all subseque
 1. Go to **Agents → Show Agents → + New Agent**
 2. Click **Create Voucher** and copy the string (e.g. `peKxylVY`)
 
+### 4c — Upload and unlock wordlists and rules
+
+1. Go to **Files → Wordlists** (or **Rules**) and upload your files
+2. After uploading, each file will show a **locked** status — click **Unlock** on each one before using it in a task
+
+Hashtopolis locks uploaded files by default. Tasks will fail silently if the wordlist or rule file is still locked.
+
 ---
 
 ## Step 5 — Re-apply with the Voucher
@@ -141,6 +148,8 @@ The Lambda runs every minute, counts non-archived tasks via the Hashtopolis API,
 - **Add a task** → Lambda detects it → 2 spot GPU agents launch → register → cracking starts
 - **Archive the task** → Lambda detects zero tasks → ASG scales to 0 → instances terminate
 
+Tasks with `priority = 0` are treated as paused and ignored by the scaler.
+
 ---
 
 ## Variables
@@ -148,8 +157,8 @@ The Lambda runs every minute, counts non-archived tasks via the Hashtopolis API,
 | Variable | Default | Description |
 |---|---|---|
 | `region` | `us-east-1` | AWS region |
+| `availability_zone` | `us-east-1b` | AZ for the subnet and instances |
 | `agent_ami_id` | required | AMI ID from the Packer build |
-| `viewer_usernames` | `[]` | IAM users to create and grant UI access |
 | `max_gpu_instances` | `5` | Max concurrent agent spot instances |
 | `local_ui_port` | `8082` | Local port for the SSM tunnel |
 | `hashtopolis_voucher` | `""` | Agent registration voucher (set in Step 5) |
@@ -186,14 +195,20 @@ Docker is still pulling images. Wait 2–3 minutes and retry. Make sure the SSM 
 sudo journalctl -u hashtopolis-agent -f
 ```
 
+**Agents failing to launch (insufficient capacity)**
+`g4dn.xlarge` spot capacity varies by AZ. If agents fail to launch, try a different AZ:
+```bash
+terraform apply -var="agent_ami_id=ami-0abc1234def567890" -var="availability_zone=us-east-1c"
+```
+
 **Agent stuck on `downloadBinary`**
-The default hashcat cracker URL may need registering. Go to **Config → Crackers → New Cracker**, set version `7.1.2` and URL `https://hashcat.net/files/hashcat-7.1.2.7z`.
+The hashcat cracker may not be registered. Go to **Config → Crackers → New Cracker**, set version `7.1.2` and URL `https://hashcat.net/files/hashcat-7.1.2.7z`.
 
 **SSM command not found**
 Install the Session Manager plugin linked in Prerequisites.
 
-**`VcpuLimitExceeded` during agent launch**
-Request G-instance spot quota via **Service Quotas → EC2 → G and VT Spot Instance Requests**.
+**`VcpuLimitExceeded`**
+Request G-instance quota via **Service Quotas → EC2 → Running On-Demand G and VT instances** (for Packer builds) and **G and VT Spot Instance Requests** (for agents).
 
 ---
 

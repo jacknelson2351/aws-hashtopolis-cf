@@ -19,7 +19,7 @@ graph TB
             Agent["Agent EC2<br/>NVIDIA CUDA drivers + python pre-baked in AMI<br/>no inbound rules"]
         end
 
-        Lambda["λ Lambda Scaler — VPC attached"]
+        Lambda["λ Lambda Scaler"]
     end
 
     Users -->|"aws ssm start-session<br/>port forwards localhost → server :8080<br/>IAM auth, no open ports"| IGW
