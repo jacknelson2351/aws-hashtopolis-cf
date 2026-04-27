@@ -24,24 +24,6 @@ def api_token():
     return data["token"]
 
 
-def trust_new_agents(token):
-    req = urllib.request.Request(
-        f"{HASHTOPOLIS_URL}/api/v2/ui/agents?maxResults=100",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    agents = json.loads(urllib.request.urlopen(req, timeout=10).read()).get("values", [])
-    for agent in agents:
-        if not agent.get("isTrusted"):
-            patch = urllib.request.Request(
-                f"{HASHTOPOLIS_URL}/api/v2/ui/agents/{agent['agentId']}",
-                data=json.dumps({"isTrusted": True}).encode(),
-                method="PATCH",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(patch, timeout=10)
-            print(f"trusted agent {agent['agentId']} ({agent['agentName']})")
-
-
 def active_tasks(token):
     try:
         req = urllib.request.Request(
@@ -66,13 +48,12 @@ def lambda_handler(event, context):
 
     try:
         token = api_token()
-        trust_new_agents(token)
         tasks = active_tasks(token)
     except Exception as e:
         print(f"Hashtopolis unreachable: {e}")
         tasks = 0
 
-    wanted  = min(tasks, MAX_INSTANCES)
+    wanted  = min(tasks * 2, MAX_INSTANCES)
     print(f"scaler current={current} active_tasks={tasks} wanted={wanted}")
 
     if wanted != current:
