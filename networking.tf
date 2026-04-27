@@ -16,6 +16,15 @@ resource "aws_subnet" "main" {
   tags = { Name = "hashtopolis" }
 }
 
+resource "aws_vpc_endpoint" "autoscaling" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.region}.autoscaling"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.main.id]
+  security_group_ids  = [aws_security_group.lambda.id]
+  private_dns_enabled = true
+}
+
 resource "aws_route_table" "main" {
   vpc_id = aws_vpc.main.id
   route {

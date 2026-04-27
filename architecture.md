@@ -19,15 +19,17 @@ graph TB
             Agent["Agent EC2<br/>NVIDIA CUDA drivers + python pre-baked in AMI<br/>no inbound rules"]
         end
 
-        Lambda["λ Lambda Scaler"]
+        Lambda["λ Lambda Scaler<br/>VPC-attached"]
+        Endpoint["🔒 VPC Endpoint<br/>autoscaling API"]
     end
 
     Users -->|"aws ssm start-session<br/>port forwards localhost → server :8080<br/>IAM auth, no open ports"| IGW
     IGW -->|"SSM tunnel via Elastic IP"| ServerEC2
 
     EventBridge -->|"triggers every minute"| Lambda
-    Lambda -->|"1. GET /api/v2/tasks — count active tasks"| Backend
-    Lambda -->|"2. set ASG desired capacity"| ASG
+    Lambda -->|"1. GET /api/v2/tasks — private IP"| Backend
+    Lambda -->|"2. set ASG desired capacity"| Endpoint
+    Endpoint -->|"autoscaling API"| ASG
 
     Agent -->|"boot: download hashtopolis.zip from server :8080"| Backend
     Agent -->|"register with voucher, poll for tasks, submit results"| Backend

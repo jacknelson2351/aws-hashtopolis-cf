@@ -13,7 +13,8 @@ Port 8080 is **not exposed to the internet**. All access is through AWS SSM — 
 | Hashtopolis server | Runs the web UI and API on a `t3.small` EC2 instance using Docker Compose |
 | Agent AMI | Pre-installs NVIDIA CUDA drivers so GPU spot agents boot fast |
 | Auto Scaling Group | Holds the agent fleet at `0` when idle, scales up when tasks exist |
-| Lambda scaler | Polls Hashtopolis every minute and sets ASG desired capacity (2 agents per task) |
+| Lambda scaler | Polls Hashtopolis every minute via private IP and sets ASG desired capacity (2 agents per task) |
+| VPC endpoint | Allows the Lambda to reach the AWS autoscaling API without internet access |
 | IAM viewer group | Grants named users SSM port-forward access to the UI — no shell, no other permissions |
 
 ---
@@ -176,7 +177,8 @@ Tasks with `priority = 0` are treated as paused and ignored by the scaler.
 | Agent AMI snapshot | <$1 |
 | Elastic IP (attached) | $0 |
 | Lambda + EventBridge | $0 (free tier) |
-| **Idle total** | **~$16–17/mo** |
+| Autoscaling VPC endpoint | ~$7/mo |
+| **Idle total** | **~$23–24/mo** |
 | g4dn.xlarge spot agents | ~$0.16–0.30/hr per instance while cracking |
 
 ---

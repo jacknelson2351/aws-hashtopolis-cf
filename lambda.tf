@@ -13,9 +13,14 @@ resource "aws_lambda_function" "scaler" {
   timeout          = 30
   source_code_hash = data.archive_file.lambda.output_base64sha256
 
+  vpc_config {
+    subnet_ids         = [aws_subnet.main.id]
+    security_group_ids = [aws_security_group.lambda.id]
+  }
+
   environment {
     variables = {
-      HASHTOPOLIS_URL      = "http://${aws_eip.server.public_ip}:8080"
+      HASHTOPOLIS_URL      = "http://${aws_instance.server.private_ip}:8080"
       ASG_NAME             = aws_autoscaling_group.agents.name
       MAX_INSTANCES        = tostring(var.max_gpu_instances)
       HASHTOPOLIS_USERNAME = var.hashtopolis_username
