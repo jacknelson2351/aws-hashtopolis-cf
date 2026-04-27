@@ -15,11 +15,12 @@ resource "aws_lambda_function" "scaler" {
 
   environment {
     variables = {
-      HASHTOPOLIS_URL = "http://${aws_eip.server.public_ip}:8080"
-      ASG_NAME        = aws_autoscaling_group.agents.name
-      MAX_INSTANCES   = tostring(var.max_gpu_instances)
-      API_KEY         = var.hashtopolis_api_key
-      REGION          = var.region
+      HASHTOPOLIS_URL      = "http://${aws_eip.server.public_ip}:8080"
+      ASG_NAME             = aws_autoscaling_group.agents.name
+      MAX_INSTANCES        = tostring(var.max_gpu_instances)
+      HASHTOPOLIS_USERNAME = var.hashtopolis_username
+      HASHTOPOLIS_PASSWORD = var.hashtopolis_password
+      REGION               = var.region
     }
   }
 }

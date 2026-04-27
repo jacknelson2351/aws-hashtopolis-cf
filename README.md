@@ -1,298 +1,145 @@
 # Hashtopolis on AWS
 
-Distributed GPU password cracking. The server runs on a cheap `t3.small` with no public ports. GPU spot instances spin up automatically when there are tasks and shut down when there aren't.
+Distributed password cracking on AWS using Hashtopolis. A Hashtopolis server runs on EC2 and a Lambda function automatically scales spot agent instances up and down based on active tasks.
+
+Port 8080 is **not exposed to the internet**. All access is through AWS SSM — no SSH keys, no open ports, no VPN.
 
 ---
 
-## What you need before starting
+## What This Builds
 
-- **AWS CLI** installed and configured (`aws configure`)
-- **Terraform** ≥ 1.0 installed
-- **AWS SSM Session Manager plugin** — required to access the server without SSH:
-  ```
-  https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
-  ```
-- **Packer** — to build the GPU agent AMI (only needed once):
-  ```
-  https://developer.hashicorp.com/packer/install
-  ```
-- An **AWS key pair** is not needed. Access is via SSM.
+| Part | What it does |
+|---|---|
+| Hashtopolis server | Runs the web UI and API on a `t3.small` EC2 instance using Docker Compose |
+| Agent AMI | Pre-installs hashcat and agent dependencies so spot agents boot fast |
+| Auto Scaling Group | Holds the agent fleet at `0` when idle, scales up when tasks exist |
+| Lambda scaler | Polls Hashtopolis every minute and sets ASG desired capacity accordingly |
+| IAM viewer group | Grants named users SSM port-forward access to the UI — no shell, no other permissions |
+
+> **Current state:** CPU-only (`c5.xlarge`) while GPU quota is pending. See [Switching to GPU](#switching-to-gpu) when approved.
 
 ---
 
-## Step 1 — Build the agent AMI (one time)
+## Prerequisites
 
-This builds a custom AMI with CUDA, hashcat, and the Hashtopolis agent pre-installed. It takes ~20 minutes. You only do this once (or when you want to update drivers).
+Install these before starting:
 
-Create a file called `agent.pkr.hcl`:
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) — run `aws configure` after installing
+- [Terraform ≥ 1.0](https://developer.hashicorp.com/terraform/install)
+- [Packer](https://developer.hashicorp.com/packer/install)
+- [SSM Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) — required for the port-forward command
 
-```hcl
-packer {
-  required_plugins {
-    amazon = {
-      version = ">= 1.2.0"
-      source  = "github.com/hashicorp/amazon"
-    }
-  }
-}
+No SSH key pair is needed.
 
-source "amazon-ebs" "agent" {
-  region        = "us-east-1"
-  instance_type = "g4dn.xlarge"
-  ssh_username  = "ubuntu"
-  source_ami_filter {
-    filters     = { name = "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" }
-    owners      = ["099720109477"]
-    most_recent = true
-  }
-  ami_name = "hashtopolis-agent-{{timestamp}}"
-}
+---
 
-build {
-  sources = ["source.amazon-ebs.agent"]
-  provisioner "shell" {
-    inline = [
-      "sudo apt-get update -y",
-      "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb",
-      "sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt-get update -y",
-      "sudo apt-get install -y cuda-toolkit-12-3 nvidia-driver-545 hashcat python3 python3-pip",
-      "sudo pip3 install requests psutil",
-      "sudo mkdir -p /opt/hashtopolis",
-      "wget -q $(curl -s https://api.github.com/repos/hashtopolis/client/releases/latest | grep browser_download_url | grep .zip | cut -d'\"' -f4) -O /opt/hashtopolis/hashtopolis.zip",
-    ]
-  }
-}
-```
+## Step 1 — Build the Agent AMI
 
-Run it:
+Run once. Packer launches a temporary build instance, installs all dependencies, and snapshots it into an AMI.
 
 ```bash
 packer init agent.pkr.hcl
 packer build agent.pkr.hcl
 ```
 
-At the end you'll see something like:
+At the end you will see:
 
 ```
 AMI: ami-0abc1234def567890
 ```
 
-**Save that AMI ID — you need it in Step 2.**
+Save that AMI ID — you need it in the next step.
 
 ---
 
-## Step 2 — Deploy the server
+## Step 2 — Deploy
 
 ```bash
 terraform init
 terraform apply -var="agent_ami_id=ami-0abc1234def567890"
 ```
 
-> Replace `ami-0abc1234def567890` with the AMI ID from Step 1.
+Replace `ami-0abc1234def567890` with the AMI ID from Step 1. Type `yes` when prompted.
 
-Terraform will ask you to confirm. Type `yes`.
+This takes about 2 minutes. When done, run:
 
-This takes about 2 minutes. When it finishes you'll see output like:
-
+```bash
+terraform output
 ```
-server_instance_id = "i-0abc1234def567890"
-ssm_shell          = "aws ssm start-session --target i-0abc1234def567890 ..."
-ssm_ui             = "aws ssm start-session --target i-0abc1234def567890 ... --document-name AWS-StartPortForwardingSession ..."
-```
+
+You'll see your instance ID and the exact SSM commands to use.
+
+### Adding team members
+
+Terraform creates an IAM group called `hashtopolis-viewers`. Add any existing IAM user to it:
+
+**AWS Console:** IAM → User Groups → `hashtopolis-viewers` → Add users
+
+Members can port-forward to the UI but cannot open a shell or access anything else in the account.
 
 ---
 
 ## Step 3 — Access the Hashtopolis UI
 
-Run the `ssm_ui` command from the Terraform output. It will look like:
+Get the exact command from Terraform and run it:
 
 ```bash
-aws ssm start-session --target i-0abc1234def567890 --region us-east-1 \
-  --document-name AWS-StartPortForwardingSession \
-  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
+terraform output -raw ssm_ui
 ```
 
-Leave that terminal open. Then open your browser to:
+Leave that terminal open, then open:
 
 ```
-http://localhost:8080
+http://localhost:8082
 ```
 
-Log in with:
+Default login:
 - **Username:** `admin`
 - **Password:** `hashtopolis`
 
-> Change the password immediately: top-right menu → User Settings → Account.
-
-Wait a minute or two after deploy if you get a connection refused — Docker is still pulling images on first boot.
+> If you get "connection refused", wait 2–3 minutes — Docker is still pulling images on first boot.
 
 ---
 
-## Step 4 — Configure Hashtopolis for auto-scaling
+## Step 4 — First-time Hashtopolis Setup
 
-You need to do this once so agents can register automatically.
+Do this once after the server is up.
 
-### 4a — Enable bulk agent registration
+### 4a — Allow multiple agents to use the same voucher
 
-This allows multiple spot instances to register using the same voucher.
+1. Go to **Config → Server**
+2. Enable **"Vouchers can be used multiple times and will not be deleted automatically"**
+3. Click **Save Changes**
 
-1. Go to **Config** (top nav) → **Agents** tab
-2. Find **"Allow multiple agent registrations per voucher"** and enable it
-3. Save
+Without this, the first agent registration consumes the voucher and all subsequent agents fail to register.
 
 ### 4b — Create an agent voucher
 
-1. Go to **Agents** → **New Agent**
-2. Click **Create Voucher**
-3. Copy the voucher string (looks like `peKxylVY`)
-
-### 4c — Create an API token
-
-The Lambda scaler uses this to check for active tasks.
-
-1. Go to **Config** → **API Tokens**
-2. Click **Create Token**
-3. Copy the token
+1. Go to **Agents → Show Agents → + New Agent**
+2. Click **Create Voucher** and copy the string (e.g. `peKxylVY`)
 
 ---
 
-## Step 5 — Re-apply with the voucher and token
+## Step 5 — Re-apply with the Voucher
 
 ```bash
 terraform apply \
   -var="agent_ami_id=ami-0abc1234def567890" \
-  -var="hashtopolis_voucher=YOUR_VOUCHER_HERE" \
-  -var="hashtopolis_api_key=YOUR_TOKEN_HERE"
+  -var="hashtopolis_voucher=YOUR_VOUCHER_HERE"
 ```
 
-This updates the agent launch template with the voucher and the Lambda scaler with the API token. Confirm with `yes`.
+If you changed the Hashtopolis password, add `-var="hashtopolis_password=YOUR_PASSWORD"` so the Lambda scaler can authenticate.
 
-That's it. The system is fully operational.
+The stack is now fully operational. Add a task in Hashtopolis and agents will appear within 60 seconds.
 
 ---
 
-## How auto-scaling works
+## How Auto-Scaling Works
 
-The Lambda function runs every minute. It calls the Hashtopolis API, counts non-archived tasks, and sets the Auto Scaling Group's desired capacity accordingly (capped at `max_gpu_instances`, default 5).
+The Lambda runs every minute, counts non-archived tasks via the Hashtopolis API, and sets ASG desired capacity accordingly (capped at `max_gpu_instances`).
 
-- **Add a task in Hashtopolis** → Lambda detects it within 60 seconds → spot GPU instances launch → agents register → cracking starts
-- **Archive the task** → Lambda detects no active tasks → ASG scales to 0 → instances terminate → cost drops back to ~$15/mo
-
----
-
-## Team access
-
-Anyone who needs to access the server — whether via browser or terminal — needs an AWS IAM account in your org's AWS account with the right permissions. No SSH keys, no VPN. Access control is entirely through IAM.
-
-### Setting up IAM for a team member
-
-#### 1. Create the IAM policy
-
-In the AWS Console: **IAM → Policies → Create policy → JSON tab**
-
-Paste this policy and name it `HashstopolisAccess`:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowSSMSession",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:StartSession",
-        "ssm:TerminateSession",
-        "ssm:ResumeSession"
-      ],
-      "Resource": [
-        "arn:aws:ec2:*:*:instance/*",
-        "arn:aws:ssm:*:*:session/${aws:username}-*"
-      ],
-      "Condition": {
-        "StringLike": {
-          "ssm:resourceTag/Name": "hashtopolis-server"
-        }
-      }
-    },
-    {
-      "Sid": "AllowPortForwarding",
-      "Effect": "Allow",
-      "Action": "ssm:StartSession",
-      "Resource": "arn:aws:ssm:*:*:document/AWS-StartPortForwardingSession"
-    },
-    {
-      "Sid": "AllowConsoleNavigation",
-      "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeInstances",
-        "ssm:DescribeSessions",
-        "ssm:GetConnectionStatus",
-        "ssm:DescribeInstanceInformation",
-        "ssm:DescribeInstanceProperties"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-The `Condition` block locks the session permission down to only the instance tagged `Name = hashtopolis-server` — team members can't use this policy to SSM into other instances in the account.
-
-#### 2. Create the IAM user
-
-**IAM → Users → Create user**
-
-1. Set a username (e.g. `alice`)
-2. Check **"Provide user access to the AWS Management Console"** if they need browser access
-3. On the permissions step, choose **"Attach policies directly"** and select `HashtopolisAccess`
-4. Finish creating the user
-5. Send them their console login URL, username, and temporary password
-
-#### 3. They install the Session Manager plugin
-
-Team members who want to use the CLI port-forward command (for the web UI) need the plugin:
-```
-https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
-```
-
-Team members who only use the AWS Console don't need it.
-
----
-
-## Day-to-day access
-
-### Via AWS Console (no CLI needed)
-
-**Shell access:**
-
-1. Go to **EC2 → Instances**
-2. Select the `hashtopolis-server` instance
-3. Click **Connect → Session Manager tab → Connect**
-
-A terminal opens in the browser. Done.
-
-**Web UI access via console** requires the CLI port-forward command (see below) — the browser-based terminal doesn't support port forwarding.
-
-### Via CLI
-
-**Open a shell on the server:**
-```bash
-# Copy and run the ssm_shell output from terraform output
-aws ssm start-session --target i-xxxx --region us-east-1
-```
-
-**Open the web UI:**
-```bash
-# Run this, leave the terminal open, then go to http://localhost:8080
-aws ssm start-session --target i-xxxx --region us-east-1 \
-  --document-name AWS-StartPortForwardingSession \
-  --parameters '{"portNumber":["8080"],"localPortNumber":["8080"]}'
-```
-
-**Get your instance ID and exact commands at any time:**
-```bash
-terraform output
-```
+- **Add a task** → Lambda detects it → spot agents launch → register → cracking starts
+- **Archive the task** → Lambda detects zero tasks → ASG scales to 0 → instances terminate
 
 ---
 
@@ -301,38 +148,139 @@ terraform output
 | Variable | Default | Description |
 |---|---|---|
 | `region` | `us-east-1` | AWS region |
-| `agent_ami_id` | required | AMI ID from Packer build |
-| `max_gpu_instances` | `5` | Maximum concurrent GPU spot instances |
-| `hashtopolis_voucher` | `""` | Agent registration voucher (set after Step 4) |
-| `hashtopolis_api_key` | `""` | JWT API token for the Lambda scaler (set after Step 4) |
+| `agent_ami_id` | required | AMI ID from the Packer build |
+| `viewer_usernames` | `[]` | IAM users to create and grant UI access |
+| `max_gpu_instances` | `5` | Max concurrent agent spot instances |
+| `local_ui_port` | `8082` | Local port for the SSM tunnel |
+| `hashtopolis_voucher` | `""` | Agent registration voucher (set in Step 5) |
+| `hashtopolis_username` | `admin` | Hashtopolis user for the Lambda scaler |
+| `hashtopolis_password` | `hashtopolis` | Hashtopolis password for the Lambda scaler |
 
 ---
 
 ## Cost
 
-| Resource | $/mo | Notes |
-|---|---|---|
-| t3.small server | ~$15 | On-demand, runs 24/7 |
-| Server EBS volume (8GB gp3) | ~$1 | Root disk |
-| Agent AMI snapshot | ~$1.50 | CUDA image stored in S3 after Packer build |
-| Elastic IP (attached) | $0 | Only charged when not attached to a running instance |
-| Lambda + EventBridge (1/min) | $0 | Well within free tier (43,800 invocations/mo vs 1M free) |
-| **Idle total** | **~$18/mo** | |
-| g4dn.xlarge spot (when cracking) | $0.16–0.25/hr per instance | Fluctuates — check current prices at EC2 Spot Pricing page |
-
-Spot instances are terminated the moment you archive all tasks.
+| Resource | $/mo |
+|---|---|
+| t3.small server | ~$15 |
+| Server EBS volume | ~$1 |
+| Agent AMI snapshot | <$1 |
+| Elastic IP (attached) | $0 |
+| Lambda + EventBridge | $0 (free tier) |
+| **Idle total** | **~$16–17/mo** |
+| c5.xlarge spot agents | hourly while cracking |
 
 ---
 
 ## Troubleshooting
 
-**"Connection refused" on localhost:8080**
-Docker is still pulling images on first boot. Wait 2–3 minutes and retry.
+**Connection refused on localhost:8082**
+Docker is still pulling images. Wait 2–3 minutes and retry. Make sure the SSM port-forward terminal is still open.
 
-**Agents not appearing after tasks are added**
-- Check the voucher was saved: `terraform output` should show it was applied
-- Check bulk registration is enabled (Step 4a)
-- Check the Lambda scaler logs in CloudWatch → Log Groups → `/aws/lambda/hashtopolis-scaler`
+**Agents not appearing after adding a task**
+- Confirm the voucher was applied: `terraform output`
+- Confirm bulk registration is enabled (Step 4a)
+- Check Lambda logs: **CloudWatch → Log Groups → `/aws/lambda/hashtopolis-scaler`**
+- Check agent logs on a running instance:
+```bash
+sudo journalctl -u hashtopolis-agent -f
+```
 
-**SSM session manager command not found**
-Install the session manager plugin linked in the prerequisites section.
+**Agent stuck on `downloadBinary`**
+The default hashcat cracker URL may need registering. Go to **Config → Crackers → New Cracker**, set version `7.1.2` and URL `https://hashcat.net/files/hashcat-7.1.2.7z`.
+
+**SSM command not found**
+Install the Session Manager plugin linked in Prerequisites.
+
+**`VcpuLimitExceeded` during Packer build**
+Your account has no vCPU quota for that instance family. The current config uses `c5.xlarge` to avoid this. Request GPU quota before switching to `g4dn.xlarge`.
+
+---
+
+## Destroy
+
+```bash
+terraform destroy -var="agent_ami_id=ami-0abc1234def567890"
+```
+
+Packer AMIs are not managed by Terraform. Clean them up manually:
+
+```bash
+aws ec2 describe-images --owners self \
+  --filters "Name=name,Values=hashtopolis-agent-*" \
+  --query "Images[].{ImageId:ImageId,SnapshotId:BlockDeviceMappings[0].Ebs.SnapshotId}" \
+  --output table
+```
+
+```bash
+aws ec2 deregister-image --image-id ami-xxxxxxxxxxxxxxxxx
+aws ec2 delete-snapshot --snapshot-id snap-xxxxxxxxxxxxxxxxx
+```
+
+---
+
+## Switching to GPU
+
+After AWS approves G-instance quotas, make the following exact changes:
+
+### 1. `agent.pkr.hcl` — change build instance type
+
+```diff
+-  instance_type = "c5.xlarge"
++  instance_type = "g4dn.xlarge"
+```
+
+### 2. `scripts/agent_init.sh` — replace PoCL with NVIDIA drivers + CUDA
+
+```bash
+#!/bin/bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -y
+apt-get install -y software-properties-common
+add-apt-repository universe -y
+apt-get update -y
+apt-get install -y ca-certificates curl p7zip-full python3 python3-pip
+
+# NVIDIA driver + CUDA keyring
+curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb
+dpkg -i /tmp/cuda-keyring.deb
+apt-get update -y
+apt-get install -y cuda-drivers nvidia-cuda-toolkit
+
+pip3 install requests psutil
+```
+
+### 3. `agents.tf` — change instance type and remove `--cpu-only`
+
+```diff
+-  instance_type = "c5.xlarge"
++  instance_type = "g4dn.xlarge"
+```
+
+```diff
+     exec /usr/bin/python3 /opt/hashtopolis/hashtopolis.zip \
+       --url "http://${aws_instance.server.private_ip}:8080/api/server.php" \
+-      --voucher "${var.hashtopolis_voucher}" \
+-      --cpu-only
++      --voucher "${var.hashtopolis_voucher}"
+```
+
+### 4. Rebuild the AMI
+
+```bash
+packer build agent.pkr.hcl
+```
+
+Copy the new AMI ID from the output.
+
+### 5. Re-apply Terraform
+
+```bash
+terraform apply \
+  -var="agent_ami_id=ami-NEW_AMI_ID_HERE" \
+  -var="hashtopolis_voucher=YOUR_VOUCHER_HERE"
+```
+
+> After switching, go to **Config → Crackers** in the Hashtopolis UI and register a GPU-compatible hashcat version (7.x) so agents pick it up.

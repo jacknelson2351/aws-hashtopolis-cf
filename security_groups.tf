@@ -2,8 +2,6 @@ resource "aws_security_group" "server" {
   name   = "hashtopolis-server"
   vpc_id = aws_vpc.main.id
 
-  # Port 8080 open to world — agents have dynamic IPs, Lambda is outside the VPC.
-  # All Hashtopolis endpoints require auth (JWT bearer token).
   ingress {
     from_port   = 8080
     to_port     = 8080

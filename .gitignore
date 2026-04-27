@@ -11,6 +11,7 @@
 
 # Generated Lambda zip — built by Terraform at apply time
 lambda.zip
+__pycache__/
 
 # Local override files
 override.tf
@@ -25,3 +26,12 @@ crash.*.log
 # Packer artifacts
 packer_cache/
 *.pkr.hcl.lock.json
+
+# Local installers/downloads
+*.pkg
+
+# Claude Code local settings (may contain IP addresses / session permissions)
+.claude/
+
+# Scratch/debug files
+ssm-cache-hashcat-params.json

@@ -9,7 +9,7 @@ packer {
 
 source "amazon-ebs" "agent" {
   region        = "us-east-1"
-  instance_type = "g4dn.xlarge"
+  instance_type = "c5.xlarge"
   ssh_username  = "ubuntu"
   source_ami_filter {
     filters     = { name = "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" }
@@ -17,19 +17,19 @@ source "amazon-ebs" "agent" {
     most_recent = true
   }
   ami_name = "hashtopolis-agent-{{timestamp}}"
+
+  launch_block_device_mappings {
+    device_name           = "/dev/sda1"
+    volume_size           = 30
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
 }
 
 build {
   sources = ["source.amazon-ebs.agent"]
   provisioner "shell" {
-    inline = [
-      "sudo apt-get update -y",
-      "wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb",
-      "sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt-get update -y",
-      "sudo apt-get install -y cuda-toolkit-12-3 nvidia-driver-545 hashcat python3 python3-pip",
-      "sudo pip3 install requests psutil",
-      "sudo mkdir -p /opt/hashtopolis",
-      "wget -q $(curl -s https://api.github.com/repos/hashtopolis/client/releases/latest | grep browser_download_url | grep .zip | cut -d'\"' -f4) -O /opt/hashtopolis/hashtopolis.zip",
-    ]
+    script          = "scripts/agent_init.sh"
+    execute_command = "sudo bash '{{.Path}}'"
   }
 }

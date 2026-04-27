@@ -10,13 +10,23 @@ variable "max_gpu_instances" {
   default = 5
 }
 
+variable "local_ui_port" {
+  description = "Local port used by the SSM tunnel for the Hashtopolis web UI. The server still listens on 8080."
+  default     = 8082
+}
+
 variable "hashtopolis_voucher" {
   description = "Agent voucher from Hashtopolis UI (Agents > New Agent). Leave blank on first deploy."
   default     = ""
 }
 
-variable "hashtopolis_api_key" {
-  description = "JWT API token from Hashtopolis UI (Config > API Tokens). Leave blank on first deploy."
+variable "hashtopolis_username" {
+  description = "Hashtopolis web username used by the Lambda scaler to request short-lived APIv2 JWTs."
+  default     = "admin"
+}
+
+variable "hashtopolis_password" {
+  description = "Hashtopolis web password used by the Lambda scaler to request short-lived APIv2 JWTs."
   sensitive   = true
-  default     = ""
+  default     = "hashtopolis"
 }
