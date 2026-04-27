@@ -9,7 +9,7 @@ packer {
 
 source "amazon-ebs" "agent" {
   region        = "us-east-1"
-  instance_type = "c5.xlarge"
+  instance_type = "g4dn.xlarge"
   ssh_username  = "ubuntu"
   source_ami_filter {
     filters     = { name = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*" }
