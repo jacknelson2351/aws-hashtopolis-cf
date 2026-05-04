@@ -20,18 +20,7 @@ variable "local_ui_port" {
   default     = 8082
 }
 
-variable "hashtopolis_voucher" {
-  description = "Agent voucher from Hashtopolis UI (Agents > New Agent). Leave blank on first deploy."
-  default     = ""
-}
-
 variable "hashtopolis_username" {
-  description = "Hashtopolis web username used by the Lambda scaler to request short-lived APIv2 JWTs."
+  description = "Hashtopolis web username used by the server-side scaler to request short-lived APIv2 JWTs."
   default     = "admin"
-}
-
-variable "hashtopolis_password" {
-  description = "Hashtopolis web password used by the Lambda scaler to request short-lived APIv2 JWTs."
-  sensitive   = true
-  default     = "hashtopolis"
 }

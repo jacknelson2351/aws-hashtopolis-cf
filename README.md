@@ -1,8 +1,10 @@
 # Hashtopolis on AWS
 
-Distributed password cracking on AWS using Hashtopolis. A Hashtopolis server runs on EC2 and a Lambda function automatically scales GPU spot agent instances up and down based on active tasks.
+Distributed password cracking on AWS using Hashtopolis. A Hashtopolis server runs on EC2; a server-side systemd timer auto-scales GPU spot agents up and down based on active tasks.
 
-Port 8080 is **not exposed to the internet**. All access is through AWS SSM — no SSH keys, no open ports, no VPN.
+Port 8080 is **not exposed to the internet**. All UI access is through AWS SSM port-forward — no SSH keys, no open ports, no VPN.
+
+After Step 2, the system is fully working: admin password and agent voucher are generated, stored in AWS Secrets Manager, and applied to Hashtopolis automatically. No `terraform apply -var=...` two-phase deploys.
 
 ---
 
@@ -10,146 +12,121 @@ Port 8080 is **not exposed to the internet**. All access is through AWS SSM — 
 
 | Part | What it does |
 |---|---|
-| Hashtopolis server | Runs the web UI and API on a `t3.small` EC2 instance using Docker Compose |
-| Agent AMI | Pre-installs NVIDIA CUDA drivers so GPU spot agents boot fast |
+| Hashtopolis server | Web UI + API on a `t3.small` EC2 instance via Docker Compose |
+| Agent AMI | Pre-installed NVIDIA CUDA drivers so GPU spot agents boot fast |
 | Auto Scaling Group | Holds the agent fleet at `0` when idle, scales up when tasks exist |
-| Lambda scaler | Polls Hashtopolis every minute via private IP and sets ASG desired capacity (2 agents per task) |
-| VPC endpoint | Allows the Lambda to reach the AWS autoscaling API without internet access |
-| IAM viewer group | Grants named users SSM port-forward access to the UI — no shell, no other permissions |
+| Server-side scaler | systemd timer runs `scaler.py` every 3s. Calls `SetDesiredCapacity` only when the value changes (idle = zero AWS API traffic) |
+| First-boot bootstrap | Enables multi-use vouchers, generates a voucher, rotates the admin password from default to a TF-generated random value — all via the local API + DB |
+| Secrets Manager | Stores the admin password and agent voucher. Server and agents read at runtime via instance role |
+| Remote state | S3 bucket + DynamoDB lock table for Terraform state, both encrypted and not publicly accessible |
+| IAM viewer group | `hashtopolis-viewers` — SSM port-forward to the UI only, no shell |
 
 ---
 
 ## Prerequisites
 
-Install these before starting:
-
-- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) — run `aws configure` after installing
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) — `aws configure` after installing
 - [Terraform ≥ 1.0](https://developer.hashicorp.com/terraform/install)
 - [Packer](https://developer.hashicorp.com/packer/install)
-- [SSM Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) — required for the port-forward command
+- [SSM Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 
-No SSH key pair is needed.
+No SSH key pair needed.
 
-> **Note:** `g4dn.xlarge` instances require G-instance quota in your AWS account. Request both **Running On-Demand G and VT instances** and **G and VT Spot Instance Requests** via **Service Quotas → EC2** before deploying.
+> **Quota:** `g4dn.xlarge` agents need G-class spot quota. Request both **Running On-Demand G and VT instances** and **All G and VT Spot Instance Requests** under **Service Quotas → EC2** before deploying. Each agent is 4 vCPU, so e.g. 8 vCPU of spot quota = 2 concurrent agents.
 
 ---
 
-## Step 1 — Build the Agent AMI
+## Step 0 — Bootstrap remote state (one time per account)
 
-Run once. Packer launches a `g4dn.xlarge` build instance, installs NVIDIA CUDA drivers and agent dependencies, and snapshots it into an AMI.
+Creates the S3 bucket and DynamoDB lock table for Terraform state. Both are versioned, encrypted, and public access is blocked. They are not managed by Terraform (chicken-and-egg).
+
+```bash
+./scripts/bootstrap-state-bucket.sh
+```
+
+The script prints the exact `terraform init -migrate-state ...` command to run next — copy and run it. Bucket name is derived from your AWS account ID for global uniqueness.
+
+---
+
+## Step 1 — Build the agent AMI (one time)
+
+Packer launches a `g4dn.xlarge` build instance, installs CUDA + agent dependencies, and snapshots an AMI.
 
 ```bash
 packer init agent.pkr.hcl
 packer build agent.pkr.hcl
 ```
 
-At the end you will see:
-
-```
-AMI: ami-0abc1234def567890
-```
-
-Save that AMI ID — you need it in the next step.
+Save the AMI ID printed at the end (e.g. `ami-05eac013a630b0dd3`).
 
 ---
 
 ## Step 2 — Deploy
 
 ```bash
-terraform init
-terraform apply -var="agent_ami_id=ami-0abc1234def567890"
+terraform apply -var="agent_ami_id=ami-05eac013a630b0dd3"
 ```
 
-Replace `ami-0abc1234def567890` with the AMI ID from Step 1. Type `yes` when prompted.
+Takes ~2 min for Terraform; cloud-init on the server then takes another 2-3 min to finish (Docker pull, multi-use voucher config, voucher creation, admin password rotation). All of it is automatic.
 
-This takes about 2 minutes. When done, run:
-
+When Terraform finishes:
 ```bash
 terraform output
 ```
-
-You'll see your instance ID and the exact SSM commands to use.
+Shows the instance ID, the SSM port-forward command, and helper outputs.
 
 ### Adding team members
 
-Terraform creates an IAM group called `hashtopolis-viewers`. Add any existing IAM user to it:
-
-**AWS Console:** IAM → User Groups → `hashtopolis-viewers` → Add users
-
-Members can port-forward to the UI but cannot open a shell or access anything else in the account.
+`terraform apply` creates an IAM group `hashtopolis-viewers`. Add any IAM user to it via the AWS Console (IAM → User Groups → `hashtopolis-viewers` → Add users). Members can port-forward to the UI but cannot open a shell or do anything else.
 
 ---
 
-## Step 3 — Access the Hashtopolis UI
+## Step 3 — Log in
 
-Get the exact command from Terraform and run it:
+1. Get the admin password from Secrets Manager:
+   ```bash
+   aws secretsmanager get-secret-value --secret-id hashtopolis/admin-password --query SecretString --output text
+   ```
+2. Open the SSM tunnel (leave running):
+   ```bash
+   $(terraform output -raw ssm_ui)
+   ```
+3. Browse to `http://localhost:8082` and log in as `admin` with the password from step 1.
 
-```bash
-terraform output -raw ssm_ui
-```
-
-Leave that terminal open, then open:
-
-```
-http://localhost:8082
-```
-
-Default login:
-- **Username:** `admin`
-- **Password:** `hashtopolis`
-
-> If you get "connection refused", wait 2–3 minutes — Docker is still pulling images on first boot.
+> If you get "connection refused", cloud-init is still bootstrapping. Wait 2-3 min and retry.
 
 ---
 
-## Step 4 — First-time Hashtopolis Setup
+## Step 4 — Upload wordlists and rules (only remaining manual step)
 
-Do this once after the server is up.
+In the UI:
 
-### 4a — Allow multiple agents to use the same voucher
+1. **Files → Wordlists** (or **Rules**) → upload your files
+2. Each file uploads in **locked** state — click **Unlock** on each one before using it in a task
 
-1. Go to **Config → Server**
-2. Enable **"Vouchers can be used multiple times and will not be deleted automatically"**
-3. Click **Save Changes**
-
-Without this, the first agent registration consumes the voucher and all subsequent agents fail to register.
-
-### 4b — Create an agent voucher
-
-1. Go to **Agents → Show Agents → + New Agent**
-2. Click **Create Voucher** and copy the string (e.g. `peKxylVY`)
-
-### 4c — Upload and unlock wordlists and rules
-
-1. Go to **Files → Wordlists** (or **Rules**) and upload your files
-2. After uploading, each file will show a **locked** status — click **Unlock** on each one before using it in a task
-
-Hashtopolis locks uploaded files by default. Tasks will fail silently if the wordlist or rule file is still locked.
+> Hashtopolis silently fails tasks that reference locked files.
 
 ---
 
-## Step 5 — Re-apply with the Voucher
+## Step 5 — Create a task, watch it work
 
-```bash
-terraform apply \
-  -var="agent_ami_id=ami-0abc1234def567890" \
-  -var="hashtopolis_voucher=YOUR_VOUCHER_HERE"
-```
+Create a task in **Tasks → New Task** with priority > 0. Within ~3 seconds, the scaler detects it and scales the ASG up to `2 × tasks` agents. Each agent boots, pulls the voucher from Secrets Manager, registers, and starts cracking.
 
-If you changed the Hashtopolis password, add `-var="hashtopolis_password=YOUR_PASSWORD"` so the Lambda scaler can authenticate.
-
-The stack is now fully operational. Add a task in Hashtopolis and agents will appear within 60 seconds.
+Archive the task when done — agents drain to zero within 3 seconds.
 
 ---
 
 ## How Auto-Scaling Works
 
-The Lambda runs every minute, counts non-archived tasks via the Hashtopolis API, and sets ASG desired capacity to **2 agents per active task** (capped at `max_gpu_instances`).
+A systemd timer on the server runs `scaler.py` every 3 seconds. The scaler:
 
-- **Add a task** → Lambda detects it → 2 spot GPU agents launch → register → cracking starts
-- **Archive the task** → Lambda detects zero tasks → ASG scales to 0 → instances terminate
+1. Pulls the admin password from Secrets Manager (via the EC2 instance role)
+2. Mints a JWT against the local Hashtopolis API
+3. Counts runnable tasks (non-archived, priority > 0)
+4. Computes `desired = min(tasks × 2, max_gpu_instances)`
+5. Calls `SetDesiredCapacity` **only when the value changes**
 
-Tasks with `priority = 0` are treated as paused and ignored by the scaler.
+Idle steady-state is local-API traffic only — zero AWS API calls until something changes.
 
 ---
 
@@ -162,9 +139,9 @@ Tasks with `priority = 0` are treated as paused and ignored by the scaler.
 | `agent_ami_id` | required | AMI ID from the Packer build |
 | `max_gpu_instances` | `5` | Max concurrent agent spot instances |
 | `local_ui_port` | `8082` | Local port for the SSM tunnel |
-| `hashtopolis_voucher` | `""` | Agent registration voucher (set in Step 5) |
-| `hashtopolis_username` | `admin` | Hashtopolis user for the Lambda scaler |
-| `hashtopolis_password` | `hashtopolis` | Hashtopolis password for the Lambda scaler |
+| `hashtopolis_username` | `admin` | Hashtopolis user the scaler authenticates as |
+
+The admin password and agent voucher are stored in AWS Secrets Manager — never in Terraform variables or `terraform.tfvars`. The admin password lives in TF state (since Terraform generates it via `random_password`), but state is encrypted in S3.
 
 ---
 
@@ -176,60 +153,71 @@ Tasks with `priority = 0` are treated as paused and ignored by the scaler.
 | Server EBS volume | ~$1 |
 | Agent AMI snapshot | <$1 |
 | Elastic IP (attached) | $0 |
-| Lambda + EventBridge | $0 (free tier) |
-| Autoscaling VPC endpoint | ~$7/mo |
-| **Idle total** | **~$23–24/mo** |
-| g4dn.xlarge spot agents | ~$0.16–0.30/hr per instance while cracking |
+| Secrets Manager (2 secrets) | ~$0.80 |
+| S3 state bucket + DynamoDB lock | <$0.10 |
+| **Idle total** | **~$17** |
+| g4dn.xlarge spot agents | ~$0.16-0.30/hr per instance while cracking |
 
 ---
 
 ## Troubleshooting
 
 **Connection refused on localhost:8082**
-Docker is still pulling images. Wait 2–3 minutes and retry. Make sure the SSM port-forward terminal is still open.
+Bootstrap still running. Wait 2-3 min after `terraform apply` finishes. Confirm cloud-init is done with `aws ssm send-command ... cloud-init status`.
 
 **Agents not appearing after adding a task**
-- Confirm the voucher was applied: `terraform output`
-- Confirm bulk registration is enabled (Step 4a)
-- Check Lambda logs: **CloudWatch → Log Groups → `/aws/lambda/hashtopolis-scaler`**
-- Check agent logs on a running instance:
-```bash
-sudo journalctl -u hashtopolis-agent -f
-```
+- Both secrets are set: `aws secretsmanager get-secret-value --secret-id hashtopolis/voucher` and `... hashtopolis/admin-password`
+- Scaler logs (SSM into the server): `sudo journalctl -u hashtopolis-scaler -f`
+- Agent logs (SSM into a running agent): `sudo journalctl -u hashtopolis-agent -f`
+- Agent cloud-init log if the agent never registered: `sudo tail /var/log/cloud-init-output.log`
 
-**Agents failing to launch (insufficient capacity)**
-`g4dn.xlarge` spot capacity varies by AZ. If agents fail to launch, try a different AZ:
+**Agents fail to launch with "Max spot instance count exceeded"**
+- Your G-class spot quota is full. Check current usage:
+  ```bash
+  aws ec2 describe-spot-instance-requests --filters "Name=state,Values=open,active" --query 'SpotInstanceRequests[*].[SpotInstanceRequestId,State,InstanceId,LaunchSpecification.InstanceType]' --output table
+  ```
+- Cancelled spot requests can linger and count against quota for a few minutes. If the requests are zombies (instance is `terminated` but request is `active`):
+  ```bash
+  aws ec2 cancel-spot-instance-requests --spot-instance-request-ids sir-XXXX
+  ```
+- Increase the quota under **Service Quotas → EC2 → All G and VT Spot Instance Requests** if you need more concurrency.
+
+**Agents fail to launch with "InsufficientInstanceCapacity"**
+That's regional spot capacity, not quota. Try a different AZ:
 ```bash
-terraform apply -var="agent_ami_id=ami-0abc1234def567890" -var="availability_zone=us-east-1c"
+terraform apply -var="agent_ami_id=ami-XXXX" -var="availability_zone=us-east-1c"
 ```
 
 **Agent stuck on `downloadBinary`**
-The hashcat cracker may not be registered. Go to **Config → Crackers → New Cracker**, set version `7.1.2` and URL `https://hashcat.net/files/hashcat-7.1.2.7z`.
+Hashcat cracker isn't registered. In the UI: **Config → Crackers → New Cracker**, version `7.1.2`, URL `https://hashcat.net/files/hashcat-7.1.2.7z`.
 
-**SSM command not found**
+**SSM `start-session: command not found`**
 Install the Session Manager plugin linked in Prerequisites.
 
-**`VcpuLimitExceeded`**
-Request G-instance quota via **Service Quotas → EC2 → Running On-Demand G and VT instances** (for Packer builds) and **G and VT Spot Instance Requests** (for agents).
+**Bootstrap finished but admin password in SM is `hashtopolis`**
+The bootstrap's password rotation self-check failed and fell back to the default. Look at `/var/log/cloud-init-output.log` for `[bootstrap] admin password rotation FAILED` — usually means the Hashtopolis source layout changed and the in-container PHP hash invocation broke.
 
 ---
 
 ## Destroy
 
 ```bash
-terraform destroy -var="agent_ami_id=ami-0abc1234def567890"
+terraform destroy -var="agent_ami_id=ami-XXXX"
 ```
 
-Packer AMIs are not managed by Terraform. Clean them up manually:
+The agent AMI and the state bucket/lock table are not Terraform-managed. To remove them:
 
 ```bash
+# AMI
 aws ec2 describe-images --owners self \
   --filters "Name=name,Values=hashtopolis-agent-*" \
   --query "Images[].{ImageId:ImageId,SnapshotId:BlockDeviceMappings[0].Ebs.SnapshotId}" \
   --output table
-```
 
-```bash
-aws ec2 deregister-image --image-id ami-xxxxxxxxxxxxxxxxx
-aws ec2 delete-snapshot --snapshot-id snap-xxxxxxxxxxxxxxxxx
+aws ec2 deregister-image --image-id ami-XXXXXXXXXXXXXXXXX
+aws ec2 delete-snapshot --snapshot-id snap-XXXXXXXXXXXXXXXXX
+
+# State backend (only if you're tearing down everything)
+aws s3 rb s3://hashtopolis-tfstate-<account-id> --force
+aws dynamodb delete-table --table-name hashtopolis-tfstate-lock
 ```

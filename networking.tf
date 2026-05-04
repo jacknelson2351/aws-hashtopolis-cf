@@ -1,7 +1,7 @@
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
-  tags = { Name = "hashtopolis" }
+  tags                 = { Name = "hashtopolis" }
 }
 
 resource "aws_internet_gateway" "igw" {
@@ -13,16 +13,7 @@ resource "aws_subnet" "main" {
   cidr_block              = "10.0.1.0/24"
   availability_zone       = var.availability_zone
   map_public_ip_on_launch = false
-  tags = { Name = "hashtopolis" }
-}
-
-resource "aws_vpc_endpoint" "autoscaling" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.region}.autoscaling"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.main.id]
-  security_group_ids  = [aws_security_group.lambda.id]
-  private_dns_enabled = true
+  tags                    = { Name = "hashtopolis" }
 }
 
 resource "aws_route_table" "main" {

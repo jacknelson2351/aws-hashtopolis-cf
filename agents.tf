@@ -1,6 +1,6 @@
 resource "aws_launch_template" "agent" {
-  name_prefix            = "hashtopolis-agent-"
-  image_id               = var.agent_ami_id
+  name_prefix   = "hashtopolis-agent-"
+  image_id      = var.agent_ami_id
   instance_type = "g4dn.xlarge"
 
   iam_instance_profile {
@@ -23,6 +23,9 @@ resource "aws_launch_template" "agent" {
     #!/bin/bash
     set -e
 
+    apt-get update -y
+    apt-get install -y python3-boto3
+
     mkdir -p /opt/hashtopolis
 
     cat >/opt/hashtopolis/start-agent.sh <<'SCRIPT'
@@ -31,13 +34,22 @@ resource "aws_launch_template" "agent" {
 
     cd /opt/hashtopolis
 
+    VOUCHER=""
+    while [ -z "$VOUCHER" ]; do
+      VOUCHER=$(python3 -c "import boto3,sys; v=boto3.client('secretsmanager',region_name='${var.region}').get_secret_value(SecretId='${aws_secretsmanager_secret.voucher.id}').get('SecretString',''); print(v)" 2>/dev/null || true)
+      if [ -z "$VOUCHER" ]; then
+        echo "waiting for voucher secret to be populated..."
+        sleep 30
+      fi
+    done
+
     until curl -fsS "http://${aws_instance.server.private_ip}:8080/agents.php?download=1" -o hashtopolis.zip; do
       sleep 10
     done
 
     exec /usr/bin/python3 /opt/hashtopolis/hashtopolis.zip \
       --url "http://${aws_instance.server.private_ip}:8080/api/server.php" \
-      --voucher "${var.hashtopolis_voucher}"
+      --voucher "$VOUCHER"
     SCRIPT
 
     chmod +x /opt/hashtopolis/start-agent.sh

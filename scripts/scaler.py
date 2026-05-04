@@ -1,32 +1,41 @@
+#!/usr/bin/env python3
+"""Server-side ASG scaler. Runs every minute via systemd timer."""
+
 import base64
-import boto3
 import json
 import os
+import sys
 import urllib.request
+
+import boto3
 from botocore.config import Config
 
-HASHTOPOLIS_URL = os.environ["HASHTOPOLIS_URL"]
-ASG_NAME        = os.environ["ASG_NAME"]
-MAX_INSTANCES   = int(os.environ["MAX_INSTANCES"])
-USERNAME        = os.environ["HASHTOPOLIS_USERNAME"]
-PASSWORD        = os.environ["HASHTOPOLIS_PASSWORD"]
-REGION          = os.environ["REGION"]
+HASHTOPOLIS_URL    = os.environ["HASHTOPOLIS_URL"]
+ASG_NAME           = os.environ["ASG_NAME"]
+MAX_INSTANCES      = int(os.environ["MAX_INSTANCES"])
+USERNAME           = os.environ["HASHTOPOLIS_USERNAME"]
+PASSWORD_SECRET_ID = os.environ["HASHTOPOLIS_PASSWORD_SECRET_ID"]
+REGION             = os.environ["REGION"]
 
 AGENTS_PER_TASK = 2
 
 _boto_cfg = Config(connect_timeout=5, read_timeout=10, retries={"max_attempts": 1})
 
 
-def api_token():
-    credentials = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+def get_password():
+    sm = boto3.client("secretsmanager", region_name=REGION, config=_boto_cfg)
+    return sm.get_secret_value(SecretId=PASSWORD_SECRET_ID)["SecretString"]
+
+
+def api_token(password):
+    credentials = base64.b64encode(f"{USERNAME}:{password}".encode()).decode()
     req = urllib.request.Request(
         f"{HASHTOPOLIS_URL}/api/v2/auth/token",
         data=b"",
         method="POST",
         headers={"Authorization": f"Basic {credentials}"},
     )
-    data = json.loads(urllib.request.urlopen(req, timeout=10).read())
-    return data["token"]
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())["token"]
 
 
 def active_tasks(token):
@@ -35,16 +44,14 @@ def active_tasks(token):
         headers={"Authorization": f"Bearer {token}"},
     )
     data = json.loads(urllib.request.urlopen(req, timeout=10).read())
-    tasks = data.get("values", [])
     runnable = [
-        t for t in tasks
+        t for t in data.get("values", [])
         if not t.get("isArchived", False) and int(t.get("priority", 0)) > 0
     ]
-    print(f"[tasks] total={len(tasks)} runnable={len(runnable)}")
     return len(runnable)
 
 
-def lambda_handler(event, context):
+def main():
     asg = boto3.client("autoscaling", region_name=REGION, config=_boto_cfg)
 
     try:
@@ -52,26 +59,32 @@ def lambda_handler(event, context):
             AutoScalingGroupNames=[ASG_NAME]
         )["AutoScalingGroups"][0]["DesiredCapacity"]
     except Exception as e:
-        print(f"[error] could not reach autoscaling API: {e}")
-        return
+        print(f"[error] autoscaling describe failed: {e}", file=sys.stderr)
+        return 1
 
     try:
-        token = api_token()
+        password = get_password()
+        if not password:
+            print("[skip] admin password secret is empty; not scaling")
+            return 0
+        token = api_token(password)
         tasks = active_tasks(token)
-        print(f"[ok] reached hashtopolis at {HASHTOPOLIS_URL}")
     except Exception as e:
-        print(f"[error] could not reach hashtopolis: {e}")
-        tasks = 0
+        print(f"[error] hashtopolis unreachable: {e}", file=sys.stderr)
+        return 0
 
     wanted = min(tasks * AGENTS_PER_TASK, MAX_INSTANCES)
     print(f"[scaler] current={current} runnable_tasks={tasks} wanted={wanted}")
 
     if wanted != current:
-        print(f"[scale] {current} -> {wanted}")
         asg.set_desired_capacity(
             AutoScalingGroupName=ASG_NAME,
             DesiredCapacity=wanted,
             HonorCooldown=False,
         )
-    else:
-        print(f"[scaler] no change needed (desired={current})")
+        print(f"[scale] {current} -> {wanted}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,4 +1,3 @@
-# Server role — SSM access only (no SSH needed)
 resource "aws_iam_role" "server" {
   name = "hashtopolis-server"
 
@@ -17,12 +16,47 @@ resource "aws_iam_role_policy_attachment" "server_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+resource "aws_iam_role_policy" "server" {
+  role = aws_iam_role.server.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [
+          aws_secretsmanager_secret.admin_password.arn,
+          aws_secretsmanager_secret.voucher.arn,
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = ["secretsmanager:PutSecretValue"]
+        Resource = [
+          aws_secretsmanager_secret.voucher.arn,
+          aws_secretsmanager_secret.admin_password.arn,
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["autoscaling:DescribeAutoScalingGroups"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["autoscaling:SetDesiredCapacity"]
+        Resource = aws_autoscaling_group.agents.arn
+      },
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "server" {
   name = "hashtopolis-server"
   role = aws_iam_role.server.name
 }
 
-# Viewer group — SSM port-forward only, no shell access
 resource "aws_iam_group" "viewers" {
   name = "hashtopolis-viewers"
 }
@@ -34,8 +68,8 @@ resource "aws_iam_group_policy" "viewers_ssm" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = "ssm:StartSession"
+        Effect = "Allow"
+        Action = "ssm:StartSession"
         Resource = [
           aws_instance.server.arn,
           "arn:aws:ssm:${var.region}::document/AWS-StartPortForwardingSession"
@@ -50,8 +84,6 @@ resource "aws_iam_group_policy" "viewers_ssm" {
   })
 }
 
-
-# Agent role — SSM access for debugging
 resource "aws_iam_role" "agent" {
   name = "hashtopolis-agent"
 
@@ -70,46 +102,20 @@ resource "aws_iam_role_policy_attachment" "agent_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_instance_profile" "agent" {
-  name = "hashtopolis-agent"
-  role = aws_iam_role.agent.name
-}
+resource "aws_iam_role_policy" "agent" {
+  role = aws_iam_role.agent.id
 
-# Lambda role — ASG control + CloudWatch logs
-resource "aws_iam_role" "lambda" {
-  name = "hashtopolis-lambda"
-
-  assume_role_policy = jsonencode({
+  policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-      Action    = "sts:AssumeRole"
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = aws_secretsmanager_secret.voucher.arn
     }]
   })
 }
 
-resource "aws_iam_role_policy" "lambda" {
-  role = aws_iam_role.lambda.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["autoscaling:SetDesiredCapacity", "autoscaling:DescribeAutoScalingGroups"]
-        Resource = "*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces", "ec2:DeleteNetworkInterface"]
-        Resource = "*"
-      },
-    ]
-  })
+resource "aws_iam_instance_profile" "agent" {
+  name = "hashtopolis-agent"
+  role = aws_iam_role.agent.name
 }

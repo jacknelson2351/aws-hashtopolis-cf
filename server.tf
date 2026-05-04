@@ -24,7 +24,15 @@ resource "aws_instance" "server" {
   vpc_security_group_ids = [aws_security_group.server.id]
   iam_instance_profile   = aws_iam_instance_profile.server.name
 
-  user_data = file("${path.module}/scripts/server_init.sh")
+  user_data = templatefile("${path.module}/scripts/server_init.sh", {
+    scaler_py            = file("${path.module}/scripts/scaler.py")
+    asg_name             = "hashtopolis-agents"
+    max_instances        = var.max_gpu_instances
+    region               = var.region
+    hashtopolis_username = var.hashtopolis_username
+    password_secret_id   = aws_secretsmanager_secret.admin_password.id
+    voucher_secret_id    = aws_secretsmanager_secret.voucher.id
+  })
 
   tags = { Name = "hashtopolis-server" }
 }
